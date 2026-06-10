@@ -1,5 +1,6 @@
 ---
 title: Contributing to QEMU by addressing bite-sized and normal-sized issues
+layout: post
 date: 2026-06-10 12:37:00 -0300
 description: This post documents the development of two patches submitted to the QEMU mailing list, one resolving a possible INTEGER_OVERFLOW issue in the disas directory, and another fixing persistent bitmap corruption on ENOSPC when dealing with qcow2 bitmaps.
 ---
@@ -8,7 +9,7 @@ description: This post documents the development of two patches submitted to the
 
 I found my first interesting patch when scrolling through the issues tagged as "bite-sized" in qemu's gitlab repository's issue board. The author described a possible problem found by their static analyzer that indicated a left-shift of a literal 1 which could occur enough times to cause an overflow, since the 1 value shifted was not explicitly an unsigned long and could be interpreted as an integer.
 
-'''C
+```C
   for (i = 0; i < 32; ++i)
     {
       unsigned long int x = 1 << i;
@@ -28,7 +29,7 @@ I found my first interesting patch when scrolling through the issues tagged as "
       if (x0 != x1)
         return x1 - x0;
     }
-'''
+```
 
 The fix was seemingly quite simple. By making it explicit that the number 1 used in the loop is an unsigned long integer, it is guaranteed no overflows can occur. As such, I replaced the literal 1 with the 'BIT(i)' macro found in the bitops.h header file, which translates to '1ul << i'. After fixing an error caused by including 'bitops.h' before 'osdep.h', which the former depends on, I submitted the patch both to the maintainers of disas as well as the trivial issue mailing list, as the patch was quite small.
 
@@ -36,7 +37,7 @@ The fix was seemingly quite simple. By making it explicit that the number 1 used
 
 The next day, Peter Maydell, an engineer working in the Linaro Virtualization Team on QEMU, responded to my patch essentially saying that this wasn't actually a bug and we'd effectively just be placating somebody's static analyzer, since i was at most 31 and through QEMU's '-fwrapv' compiler option, '1 << 31' was well-defined. I questioned myself why the issue was still open in that case, especially considering it had been open since 2024 and commented on by Maydell himself, but I digress.
 
-![patch1_response](/home/christian-barry/Pictures/Screenshot from 2026-06-10 13-55-22.png)
+![patch1_response](assets/img/Screenshot from 2026-06-10 13-55-22.png)
 _Response to V1 of my first patch._
 
 Importantly, he also said that if we were to bother to fix this "not-a-bug, it'd be better to "better to do it the way that upstream binutils did it, as noted in the gitlab issue: using '1ul'."
@@ -55,17 +56,17 @@ The author describes a situation in which, after attempting to delete b4patch sn
 
 He proceeds to describe a sequence of events that leads to the disk previously in use to no longer open or accept any new operations:
 
-![issue_desc](/home/christian-barry/Pictures/Screenshot from 2026-06-10 13-50-20.png)
+![issue_desc](assets/img/Screenshot from 2026-06-10 13-50-20.png)
 _Description of the sequence of events that caused the bug._
 
 The root cause of this issue is then described as two defects in the qcow2-bitmap.c file:
 
-![root_cause](/home/christian-barry/Pictures/Screenshot from 2026-06-10 13-53-51.png)
+![root_cause](assets/img/Screenshot from 2026-06-10 13-53-51.png)
 _Description of the root cause of the bug._
 
 I decided to fix bug 1 first. Looking at the structure of this file's code, it is an established pattern that errors are found by assigning the return value of a function to ret and checking if ret is less than 0, as would be the case with values such as '-EINVAL' or '-ENOMEM'.
 
-'''C
+```C
 ret = update_ext_header_and_dir(bs, bm_list);
 if (ret < 0) {
    error_setg_errno(errp, -ret, "Failed to update bitmap extension");
@@ -76,13 +77,13 @@ ret = update_header_sync(bs);
 if (ret < 0) {
    goto fail;
 }
-'''
+```
 
 Therefore, if we are to treat the 'free_bitmap_clusters()' failure as fatal, we first need to assign it's value to ret and run this same check. In case it is less than 0, we must then rollback the header update, as per the poster's suggestion.
 
 It seemed to me the best way to achieve this rollback was through a helper function that could also be applied to 'update_ext_header_and_dir()', which had it's own internal rollback logic.
 
-'''C
+```C
 fail:
 if (new_offset > 0) {
    qcow2_free_clusters(bs, new_offset, new_size, QCOW2_DISCARD_OTHER);
@@ -94,23 +95,23 @@ s->nb_bitmaps = old_nb_bitmaps;
 s->autoclear_features = old_autocl;
 
 return ret;
-'''
+```
 
 In practice, I took 'update_ext_header_and_dir()''s logic and turned it into the helper function 'rollback_ext_header_and_dir_helper()', and called it in case of 'free_bitmap_clusters()' fail and in 'update_ext_header_and_dir()' failure protocol.
 
-'''C
+```C
 ret = free_bitmap_clusters(bs, &bm->table);
 if (ret < 0)
 {
    rollback_ext_header_and_dir_helper(bs, old_offset, old_size, old_nb_bitmaps, old_autocl);
 }
-'''
+```
 
 There were a few issues with declaring functions in the wrong place and changing their names but not altering calls to them, but they were quickly resolved.
 
 Afterwards, i tackled bug 2, which involved zeroing the cluster tail after writing the bitmap directory. This was achieved by calculating the size of the tail using the ROUND_UP macro and then simply writing zeroes into this tail with 'bdrv_write_zeroes()'.
 
-'''C
+```C
 tail_size = ROUND_UP(dir_size, s->cluster_size) - dir_size;
 if (tail_size > 0) {
    ret = bdrv_pwrite_zeroes(bs->file, dir_offset + dir_size, tail_size, 0);
@@ -118,7 +119,7 @@ if (tail_size > 0) {
        goto fail;
    }
 }
-'''
+```
 
 With all this done, I attempted to reproduce the error detailed in the original issue, and found that it no longer occured, meaning my patch had, on the surface, been succesful.
 
